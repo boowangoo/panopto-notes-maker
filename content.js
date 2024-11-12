@@ -12,99 +12,90 @@ const buttonVideo = document.createElement('a');
 buttonVideo.href = '#';
 buttonVideo.innerHTML = '<span class="material-icons" style="font-size:15px;margin-bottom:-0.25rem;">add_location</span> Add Marker';
 
+let times = [];
+let captionsList = [];
 
-const times = [];
+let imgs_map = {};
+
 buttonVideo.addEventListener('click', function(event) {
     event.preventDefault();
     const video_elm = document.querySelector('video#primaryVideo')
+    video_elm.pause();
     const data = {
         time_sec: Number(video_elm.currentTime),
         time_tot: Number(video_elm.duration),
     }
     times.push(data);
     console.log("times", times);
+
+    // generate image
+    const canvas = document.createElement('canvas');
+    // canvas.width = video_elm.videoWidth;
+    // canvas.height = video_elm.videoHeight;
+    canvas.height = 480;
+    canvas.width = Math.round(video_elm.videoWidth * canvas.height / video_elm.videoHeight);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video_elm, 0, 0, canvas.width, canvas.height);
+    imgs_map[data.time_sec] = canvas.toDataURL('image/png').split(',')[1];
+
     // Send a message to the background script
     chrome.runtime.sendMessage({action: "addMarker", times});
 });
 
 document.querySelector('#eventTabControl').appendChild(buttonVideo);
 
-
-let md_document = "";
 chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
-    console.log("content.js: onMessage");
-    console.log(request);
+    // console.log("content.js: onMessage");
+    // console.log(request);
+    if (request.action === "removeMarker") {
+        console.log("removeMarker");
+        times = times.filter((_, i) => i !== request.id);
+        // imgs_map.remove(tim)
+    }
     if (request.action === "downloadFrames") {
         const video_elm = document.querySelector('video#primaryVideo');
-        downloadSrt()
-        .then(() => {
-            let curr_cap = 0;
-            for (const t of times) {
-                while (t.time_sec > captionsList[curr_cap].start) {
-                    // write into markdown document
-                    md_document += captionsList[curr_cap].caption + "\n";
+        
+        const stream = new ReadableStream({
+            async start(controller) {
+                await downloadSrt();
+                let curr_cap = 0;
+                for (const t of times) {
+                    console.log(curr_cap, captionsList);
+                    while (t.time_sec > captionsList[curr_cap].start) {
+                        controller.enqueue(new TextEncoder().encode(captionsList[curr_cap].caption + "\n"));
+                        curr_cap++;
+                    }
+                    controller.enqueue(new TextEncoder().encode(`![${t.time_sec}](data:image/png;base64,${imgs_map[t.time_sec]})\n\n`));
+                }
+                while (curr_cap < captionsList.length) {
+                    controller.enqueue(new TextEncoder().encode(captionsList[curr_cap].caption + "\n"));
                     curr_cap++;
                 }
-                video_elm.currentTime = t.time_sec;
-                video_elm.play();
-                while (video_elm.currentTime < t.time_sec + 0.2) {
-                    setTimeout(() => {
-                    }, 100);
-                }
-                video_elm.pause();
-                const canvas = document.createElement('canvas');
-                canvas.width = video_elm.videoWidth;
-                canvas.height = video_elm.videoHeight;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(video_elm, 0, 0, canvas.width, canvas.height);
-                const img = canvas.toDataURL('image/png');
-
-                // write image into markdown document
-                md_document += `![${t.time_sec}](data:image/png;base64,${img})\n`;
+                controller.close();
             }
-            // download markdown document
-            const blob = new Blob([md_document], { type: 'text/plain' });
+        });
+
+        // Create a response from the stream
+        const response = new Response(stream);
+        
+        // Get the blob from the response
+        response.blob().then(blob => {
+            // Create a blob URL
             const blobUrl = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = blobUrl;
-            a.download = "captions.md";
-            document.body.appendChild(a);
-            a.click();
+            
+            // Send message to background script to initiate download
+            chrome.runtime.sendMessage({
+                action: "initiateDownload",
+                url: blobUrl,
+                filename: "captions.md"
+            });
         });
     }
 });
 
-
-function timestamp(seconds) {
-    const hrs = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    const msecs = Math.floor((seconds % 1) * 1000);
-    return `${hrs.toString().padStart(2,'0')}:${mins.toString().padStart(2,'0')}:${secs.toString().padStart(2,'0')},${msecs.toString().padStart(3,'0')}`;
+function captionText(text) {
+    return text.replace(/\s+/, " ");
 }
-function toRows(text) {
-    const words = text.split(/\s+/);
-    let currentLine = "";
-    let result = "";
-
-    words.forEach(word => {
-      if ((currentLine + word).length <= 47) {
-          currentLine += (currentLine.length > 0 ? " " : "") + word;
-      } else {
-          if (currentLine.length > 0) {
-              result += currentLine + "\n";
-          }
-          currentLine = word;
-      }
-    });
-
-    if (currentLine.length > 0) {
-      result += currentLine + "\n";
-    }
-
-    return result;
-}
-let captionsList = [];
 function requestCaptionsInfo(videoId) {
     console.log(`requestCaptionsInfo(${videoId})`);
     return fetch(
@@ -120,10 +111,7 @@ function requestCaptionsInfo(videoId) {
     .then(data => {
         captionsList = []
         for (let i=0; i < data.length; i++) {
-            const caption = `${i+1}
-${timestamp(data[i].Time)} --> ${timestamp(data[i].Time + data[i].CaptionDuration)}
-${toRows(data[i].Caption)}
-`;
+            const caption = captionText(data[i].Caption);
             captionsList.push({start: Number(data[i].Time), caption: caption});
         }
     })
@@ -131,18 +119,6 @@ ${toRows(data[i].Caption)}
       throw error;
     });
 }
-
-// function downloadSrtCaptions(captions) {
-//     const blob = new Blob(captions, { type: 'text/plain' });
-//     const blobUrl = URL.createObjectURL(blob);
-//     const a = document.createElement('a');
-//     a.href = blobUrl;
-//     a.download = "caption.srt";
-//     document.body.appendChild(a);
-//     a.click();
-//     document.body.removeChild(a);
-//     URL.revokeObjectURL(blobUrl);
-// }
 
 function downloadSrt() {
     const url = new URL(location.href)

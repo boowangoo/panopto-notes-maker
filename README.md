@@ -1,0 +1,1 @@
+Chromium extension for getting lecture screenshots and captions from Panopto
